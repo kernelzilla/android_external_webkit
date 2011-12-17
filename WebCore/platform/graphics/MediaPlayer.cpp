@@ -20,12 +20,13 @@
  * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
  * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "config.h"
 
 #if ENABLE(VIDEO)
+
 #include "MediaPlayer.h"
 #include "MediaPlayerPrivate.h"
 
@@ -51,6 +52,9 @@
 #include "MediaPlayerPrivateChromium.h"
 #elif PLATFORM(ANDROID)
 #include "MediaPlayerPrivateAndroid.h"
+#if ENABLE(INPAGE_VIDEO)
+#include "MediaPlayerPrivateAndroidInpage.h"
+#endif
 #endif
 
 namespace WebCore {
@@ -63,10 +67,10 @@ public:
 
     virtual void load(const String&) { }
     virtual void cancelLoad() { }
-    
+
     virtual void prepareToPlay() { }
     virtual void play() { }
-    virtual void pause() { }    
+    virtual void pause() { }
 
     virtual PlatformMedia platformMedia() const { return NoPlatformMedia; }
 
@@ -117,56 +121,103 @@ public:
 #endif
 
     virtual bool hasSingleSecurityOrigin() const { return true; }
+
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+    virtual String url() const { return ""; }
+#endif
+
 };
 
-static MediaPlayerPrivateInterface* createNullMediaPlayer(MediaPlayer* player) 
-{ 
-    return new NullMediaPlayerPrivate(player); 
+static MediaPlayerPrivateInterface* createNullMediaPlayer(MediaPlayer* player)
+{
+    return new NullMediaPlayerPrivate(player);
 }
 
 
 // engine support
 
 struct MediaPlayerFactory : Noncopyable {
-    MediaPlayerFactory(CreateMediaEnginePlayer constructor, MediaEngineSupportedTypes getSupportedTypes, MediaEngineSupportsType supportsTypeAndCodecs) 
+    MediaPlayerFactory(CreateMediaEnginePlayer constructor,
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+                       GetMediaEngineType getMediaEngineType,
+#endif
+                       MediaEngineSupportedTypes getSupportedTypes,
+                       MediaEngineSupportsType supportsTypeAndCodecs)
         : constructor(constructor)
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+        , getMediaEngineType(getMediaEngineType)
+#endif
         , getSupportedTypes(getSupportedTypes)
-        , supportsTypeAndCodecs(supportsTypeAndCodecs)  
-    { 
+        , supportsTypeAndCodecs(supportsTypeAndCodecs)
+    {
     }
 
     CreateMediaEnginePlayer constructor;
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+    GetMediaEngineType getMediaEngineType;
+#endif
     MediaEngineSupportedTypes getSupportedTypes;
     MediaEngineSupportsType supportsTypeAndCodecs;
 };
 
-static void addMediaEngine(CreateMediaEnginePlayer, MediaEngineSupportedTypes, MediaEngineSupportsType);
-static MediaPlayerFactory* chooseBestEngineForTypeAndCodecs(const String& type, const String& codecs);
+static void addMediaEngine(CreateMediaEnginePlayer,
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+                           GetMediaEngineType,
+#endif
+                           MediaEngineSupportedTypes,
+                           MediaEngineSupportsType);
 
-static Vector<MediaPlayerFactory*>& installedMediaEngines() 
+static MediaPlayerFactory* chooseBestEngineForTypeAndCodecs(const String& type,
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+                                                            const MediaPlayer::MediaEngineType engineType,
+#endif
+                                                            const String& codecs);
+
+static Vector<MediaPlayerFactory*>& installedMediaEngines()
 {
     DEFINE_STATIC_LOCAL(Vector<MediaPlayerFactory*>, installedEngines, ());
     static bool enginesQueried = false;
 
     if (!enginesQueried) {
         enginesQueried = true;
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+        // register inpage media engine first to give it priority for handling its types
+        MediaPlayerPrivateAndroidInpage::registerMediaEngine(addMediaEngine);
+#endif
         MediaPlayerPrivate::registerMediaEngine(addMediaEngine);
 
         // register additional engines here
     }
-    
+
     return installedEngines;
 }
 
-static void addMediaEngine(CreateMediaEnginePlayer constructor, MediaEngineSupportedTypes getSupportedTypes, MediaEngineSupportsType supportsType)
+static void addMediaEngine(CreateMediaEnginePlayer constructor,
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+                           GetMediaEngineType getMediaEngineType,
+#endif
+                           MediaEngineSupportedTypes getSupportedTypes,
+                           MediaEngineSupportsType supportsType)
 {
     ASSERT(constructor);
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+    ASSERT(getMediaEngineType);
+#endif
     ASSERT(getSupportedTypes);
     ASSERT(supportsType);
-    installedMediaEngines().append(new MediaPlayerFactory(constructor, getSupportedTypes, supportsType));
+    installedMediaEngines().append(new MediaPlayerFactory(constructor,
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+                                                          getMediaEngineType,
+#endif
+                                                          getSupportedTypes,
+                                                          supportsType));
 }
 
-static MediaPlayerFactory* chooseBestEngineForTypeAndCodecs(const String& type, const String& codecs)
+static MediaPlayerFactory* chooseBestEngineForTypeAndCodecs(const String& type,
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+                                                            const MediaPlayer::MediaEngineType engineType,
+#endif
+                                                            const String& codecs)
 {
     Vector<MediaPlayerFactory*>& engines = installedMediaEngines();
 
@@ -175,18 +226,56 @@ static MediaPlayerFactory* chooseBestEngineForTypeAndCodecs(const String& type, 
 
     MediaPlayerFactory* engine = 0;
     MediaPlayer::SupportsType supported = MediaPlayer::IsNotSupported;
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+    MediaPlayerFactory* engineInpage = 0;
+    MediaPlayer::SupportsType supportedInpage = MediaPlayer::IsNotSupported;
+#endif
 
     unsigned count = engines.size();
     for (unsigned ndx = 0; ndx < count; ndx++) {
         MediaPlayer::SupportsType engineSupport = engines[ndx]->supportsTypeAndCodecs(type, codecs);
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+        if (engines[ndx]->getMediaEngineType() == MediaPlayer::Inpage && engineSupport > supportedInpage) {
+            supportedInpage = engineSupport;
+            engineInpage = engines[ndx];
+            continue;
+        }
+#endif
         if (engineSupport > supported) {
             supported = engineSupport;
             engine = engines[ndx];
         }
     }
 
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+    if (engineInpage && (engineType == MediaPlayer::Inpage || !engine))
+        engine = engineInpage;
+#endif
+
     return engine;
 }
+
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+// Retrieves the media engine that matches the current engine type.
+//
+// FIXME: This is a temporary solution for fullscreen video. Ideally we'll
+// want the in-page and fullscreen players to converge into a single media
+// engine.
+static MediaPlayerFactory* findMediaEngineByType(MediaPlayer::MediaEngineType type)
+{
+    Vector<MediaPlayerFactory*>& engines = installedMediaEngines();
+
+    if (engines.isEmpty())
+        return 0;
+
+    for (unsigned i = 0; i < engines.size(); ++i) {
+        if (engines[i]->getMediaEngineType() == type)
+            return engines[i];
+    }
+
+    return 0;
+}
+#endif
 
 // media player
 
@@ -203,6 +292,9 @@ MediaPlayer::MediaPlayer(MediaPlayerClient* client)
     , m_autobuffer(false)
 #if PLATFORM(ANDROID)
     , m_mediaElementType(Video)
+#if ENABLE(INPAGE_VIDEO)
+    , m_mediaEngineType(Inpage)
+#endif
 #endif
 #if ENABLE(PLUGIN_PROXY_FOR_VIDEO)
     , m_playerProxy(0)
@@ -239,13 +331,22 @@ void MediaPlayer::load(const String& url, const ContentType& contentType)
     }
 
     MediaPlayerFactory* engine = 0;
+
     if (!type.isEmpty())
-        engine = chooseBestEngineForTypeAndCodecs(type, codecs);
+        engine = chooseBestEngineForTypeAndCodecs(type,
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+                                                  mediaEngineType(),
+#endif
+                                                  codecs);
 
     // if we didn't find an engine that claims the MIME type, just use the first engine
     if (!engine && !installedMediaEngines().isEmpty())
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+        engine = findMediaEngineByType(mediaEngineType());
+#else
         engine = installedMediaEngines()[0];
-    
+#endif
+
     // don't delete and recreate the player unless it comes from a different engine
     if (engine && m_currentMediaEngine != engine) {
         m_currentMediaEngine = engine;
@@ -262,33 +363,33 @@ void MediaPlayer::load(const String& url, const ContentType& contentType)
         m_private->load(url);
     else
         m_private.set(createNullMediaPlayer(this));
-}    
+}
 
 bool MediaPlayer::hasAvailableVideoFrame() const
 {
     return m_private->hasAvailableVideoFrame();
 }
-    
+
 bool MediaPlayer::canLoadPoster() const
 {
     return m_private->canLoadPoster();
 }
-    
+
 void MediaPlayer::setPoster(const String& url)
 {
     m_private->setPoster(url);
-}    
+}
 
 void MediaPlayer::cancelLoad()
 {
     m_private->cancelLoad();
-}    
+}
 
 void MediaPlayer::prepareToPlay()
 {
     m_private->prepareToPlay();
 }
-    
+
 void MediaPlayer::play()
 {
     m_private->play();
@@ -354,11 +455,26 @@ bool MediaPlayer::hasAudio() const
     return m_private->hasAudio();
 }
 
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+void MediaPlayer::swapMediaEngine(MediaEngineType type)
+{
+    if (mediaEngineType() == type)
+        return;
+
+    float time = currentTime();
+    m_mediaEngineType = type;
+    load(m_private->url(), ContentType(""));
+    if (type == Fullscreen)
+        setVisible(true); // Forces the creation of the Java view if switching to fullscreen.
+    seek(time);
+}
+#endif
+
 bool MediaPlayer::inMediaDocument()
 {
     Frame* frame = m_frameView ? m_frameView->frame() : 0;
     Document* document = frame ? frame->document() : 0;
-    
+
     return document && document->isMediaDocument();
 }
 
@@ -385,7 +501,7 @@ float MediaPlayer::volume() const
 void MediaPlayer::setVolume(float volume)
 {
     m_volume = volume;
-    m_private->setVolume(volume);   
+    m_private->setVolume(volume);
 }
 
 bool MediaPlayer::muted() const
@@ -422,7 +538,7 @@ float MediaPlayer::rate() const
 void MediaPlayer::setRate(float rate)
 {
     m_rate = rate;
-    m_private->setRate(rate);   
+    m_private->setRate(rate);
 }
 
 bool MediaPlayer::preservesPitch() const
@@ -452,7 +568,7 @@ unsigned MediaPlayer::bytesLoaded()
 }
 
 void MediaPlayer::setSize(const IntSize& size)
-{ 
+{
     m_size = size;
     m_private->setSize(size);
 }
@@ -495,7 +611,11 @@ MediaPlayer::SupportsType MediaPlayer::supportsType(ContentType contentType)
 {
     String type = contentType.type();
     String codecs = contentType.parameter("codecs");
-    MediaPlayerFactory* engine = chooseBestEngineForTypeAndCodecs(type, codecs);
+    MediaPlayerFactory* engine = chooseBestEngineForTypeAndCodecs(type,
+#if PLATFORM(ANDROID) && ENABLE(INPAGE_VIDEO)
+                                                                  MediaPlayer::Fullscreen,
+#endif
+                                                                  codecs);
 
     if (!engine)
         return IsNotSupported;
@@ -512,12 +632,12 @@ void MediaPlayer::getSupportedTypes(HashSet<String>& types)
     unsigned count = engines.size();
     for (unsigned ndx = 0; ndx < count; ndx++)
         engines[ndx]->getSupportedTypes(types);
-} 
+}
 
 bool MediaPlayer::isAvailable()
 {
     return !installedMediaEngines().isEmpty();
-} 
+}
 
 #if ENABLE(PLUGIN_PROXY_FOR_VIDEO)
 void MediaPlayer::deliverNotification(MediaPlayerProxyNotificationType notification)
